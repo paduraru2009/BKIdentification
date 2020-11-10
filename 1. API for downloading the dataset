@@ -1,0 +1,179 @@
+1. API for downloading the dataset
+
+- need to download all the original pictures + CSV. These should be stored in a zip file on the server. We can use either Keras or wget:
+
+_URL = 'https://storage.googleapis.com/mledu-datasets/cats_and_dogs_filtered.zip'
+path_to_zip = tf.keras.utils.get_file('cats_and_dogs.zip', origin=_URL, extract=True)
+PATH = os.path.join(os.path.dirname(path_to_zip), 'cats_and_dogs_filtered')
+
+
+- need to download the split of positive/negative examples from a zip file that groups them on two sufolders, one for each of the two classes.
+
+2. Split the dataset in test, validation, train data.
+ 
+validation_dataset = image_dataset_from_directory(validation_dir,
+                                                  shuffle=True,
+                                                  batch_size=BATCH_SIZE,
+                                                  image_size=IMG_SIZE)
+
+val_batches = tf.data.experimental.cardinality(validation_dataset)
+test_dataset = validation_dataset.take(val_batches // 5)
+validation_dataset = validation_dataset.skip(val_batches // 5)
+
+print('Number of validation batches: %d' % tf.data.experimental.cardinality(validation_dataset))
+print('Number of test batches: %d' % tf.data.experimental.cardinality(test_dataset))
+
+2.5 Data augmentation layer for rotation, flip, brighness conditions.
+
+batch_size = 32
+AUTOTUNE = tf.data.experimental.AUTOTUNE
+
+def prepare(ds, shuffle=False, augment=False):
+  # Resize and rescale all datasets
+  ds = ds.map(lambda x, y: (resize_and_rescale(x), y), 
+              num_parallel_calls=AUTOTUNE)
+
+  if shuffle:
+    ds = ds.shuffle(1000)
+
+  # Batch all datasets
+  ds = ds.batch(batch_size)
+
+  # Use data augmentation only on the training set
+  if augment:
+    ds = ds.map(lambda x, y: (data_augmentation(x, training=True), y), 
+                num_parallel_calls=AUTOTUNE)
+
+  # Use buffered prefecting on all datasets
+  return ds.prefetch(buffer_size=AUTOTUNE)
+
+train_ds = prepare(train_ds, shuffle=True, augment=True)
+val_ds = prepare(val_ds)
+test_ds = prepare(test_ds)
+
+=============================================================
+
+def resize_and_rescale(image, label):
+  image = tf.cast(image, tf.float32)
+  image = tf.image.resize(image, [IMG_SIZE, IMG_SIZE])
+  image = (image / 255.0)
+  return image, label
+
+def augment(image,label):
+  image, label = resize_and_rescale(image, label)
+  # Add 6 pixels of padding
+  image = tf.image.resize_with_crop_or_pad(image, IMG_SIZE + 6, IMG_SIZE + 6) 
+   # Random crop back to the original size
+  image = tf.image.random_crop(image, size=[IMG_SIZE, IMG_SIZE, 3])
+  image = tf.image.random_brightness(image, max_delta=0.5) # Random brightness
+  image = tf.clip_by_value(image, 0, 1)
+  return image, label
+
+train_ds = (
+    train_ds
+    .cache()
+    .shuffle(1000)
+    .map(augment, num_parallel_calls=AUTOTUNE)
+    .batch(batch_size)
+    .prefetch(AUTOTUNE)   
+
+val_ds = (
+    val_ds
+    .map(resize_and_rescale, num_parallel_calls=AUTOTUNE)
+    .batch(batch_size)
+    .prefetch(AUTOTUNE)
+)
+
+test_ds = (
+    test_ds
+    .map(resize_and_rescale, num_parallel_calls=AUTOTUNE)
+    .batch(batch_size)
+    .prefetch(AUTOTUNE)
+)
+
+
+important !! be part of graph, random stuff
+@tf.function
+def load_image_train(datapoint):
+  input_image = tf.image.resize(datapoint['image'], (128, 128))
+  input_mask = tf.image.resize(datapoint['segmentation_mask'], (128, 128))
+
+  if tf.random.uniform(()) > 0.5:
+    input_image = tf.image.flip_left_right(input_image)
+    input_mask = tf.image.flip_left_right(input_mask)
+
+  input_image, input_mask = normalize(input_image, input_mask)
+
+  return input_image, input_mask
+
+---------------
+Test how images look like:
+def display(display_list):
+  plt.figure(figsize=(15, 15))
+
+  title = ['Input Image', 'True Mask', 'Predicted Mask']
+
+  for i in range(len(display_list)):
+    plt.subplot(1, len(display_list), i+1)
+    plt.title(title[i])
+    plt.imshow(tf.keras.preprocessing.image.array_to_img(display_list[i]))
+    plt.axis('off')
+  plt.show()
+
+
+
+3. Cache and prefetch
+
+AUTOTUNE = tf.data.experimental.AUTOTUNE
+
+train_dataset = train_dataset.prefetch(buffer_size=AUTOTUNE)
+validation_dataset = validation_dataset.prefetch(buffer_size=AUTOTUNE)
+test_dataset = test_dataset.prefetch(buffer_size=AUTOTUNE)
+
+4. Transfer learning and fine tuning: 
+  Offer as a variant to use mobilenet or something as a feature extractor then fine tune it.
+  Compare this with learning from raw data.
+
+  Take one of the models architecture from here for comparison.
+  https://www.tensorflow.org/tutorials/images/transfer_learning_with_hub
+
+5. Since our dataset is outputing a logit => transform it to probability using a softmax:
+https://www.tensorflow.org/tutorials/images/transfer_learning
+
+#Retrieve a batch of images from the test set
+image_batch, label_batch = test_dataset.as_numpy_iterator().next()
+predictions = model.predict_on_batch(image_batch).flatten()
+
+# Apply a sigmoid since our model returns logits
+predictions = tf.nn.sigmoid(predictions)
+predictions = tf.where(predictions < 0.5, 0, 1)
+
+
+
+========================
+
+6. Models
+ - use Hub for models architectures like imagenet/resnet, etc.
+ - encoder / decoder , U- Net.
+  - MobileNetV2
+
+
+  7. Improve visualization and validation by:
+
+  A. Display on screen stuff after each epoch :
+
+  class DisplayCallback(tf.keras.callbacks.Callback):
+  def on_epoch_end(self, epoch, logs=None):
+    clear_output(wait=True)
+    show_predictions()
+    print ('\nSample Prediction after epoch {}\n'.format(epoch+1))
+
+   EPOCHS = 20
+VAL_SUBSPLITS = 5
+VALIDATION_STEPS = info.splits['test'].num_examples//BATCH_SIZE//VAL_SUBSPLITS
+
+model_history = model.fit(train_dataset, epochs=EPOCHS,
+                          steps_per_epoch=STEPS_PER_EPOCH,
+                          validation_steps=VALIDATION_STEPS,
+                          validation_data=test_dataset,
+                          callbacks=[DisplayCallback()])
